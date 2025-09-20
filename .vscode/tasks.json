@@ -7,15 +7,18 @@
       "command": "C:/msys64/ucrt64/bin/gcc.exe",
       "options": {
         "cwd": "${workspaceFolder}",
-        "env": { "PATH": "C:/msys64/ucrt64/bin;${env:PATH}" }
+        "env": {
+          "PATH": "C:/msys64/ucrt64/bin;C:/msys64/usr/bin"
+        }
       },
       "args": [
         "main.c",
         "-o", "main.exe",
         "-g",
         "-Wall", "-Wextra",
-        "-IC:/msys64/ucrt64/include/SDL3",
+        "-IC:/msys64/ucrt64/include",
         "-LC:/msys64/ucrt64/lib",
+        "-lSDL3_image",
         "-lSDL3"
       ],
       "group": { "kind": "build", "isDefault": true },

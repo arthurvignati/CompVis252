@@ -1,114 +1,158 @@
-// Copyright (c) 2025 Andre Kishimoto - https://kishimoto.com.br/
-// SPDX-License-Identifier: Apache-2.0
-
-//------------------------------------------------------------------------------
-// Includes
-//------------------------------------------------------------------------------
 #include <stdio.h>
-#include <stdlib.h>
 #include <stdbool.h>
+#include<stdlib.h>
 #include <SDL3/SDL.h>
-#include <SDL3/SDL_main.h>
+#include <SDL3_image/SDL_image.h>
 
-//------------------------------------------------------------------------------
-// 
-//------------------------------------------------------------------------------
-void shutdown(void)
-{
+
+typedef struct {
+  SDL_Window*   window;
+  SDL_Renderer* renderer;
+} AppContext;
+
+typedef struct {
+  SDL_Surface* surface_rgba;   
+  SDL_Texture* texture;        
+  int w, h;
+} ImageData;
+
+
+static void log_sdl_error(const char* msg);
+static bool sdl_bootstrap(AppContext* app);
+static void cleanup_resources(AppContext* app, ImageData* img);
+
+static bool img_load_rgba32(const char* path, ImageData* out);
+
+static bool preview_open(AppContext* app, ImageData* img);
+static void preview_loop(AppContext* app, ImageData* img);
+
+
+void shutdown(void);
+
+static void log_sdl_error(const char* msg) {
+  SDL_Log("*** %s: %s", msg, SDL_GetError());
+}
+
+static bool sdl_bootstrap(AppContext* app) {
+  if (!SDL_Init(SDL_INIT_VIDEO)) {
+    log_sdl_error("Falha ao iniciar SDL");
+    return false;
+  }
+
+
+
+  app->window = NULL;
+  app->renderer = NULL;
+  return true;
+}
+
+static void cleanup_resources(AppContext* app, ImageData* img) {
+  if (img) {
+    if (img->texture)      SDL_DestroyTexture(img->texture);
+    if (img->surface_rgba) SDL_DestroySurface(img->surface_rgba);
+    img->texture = NULL;
+    img->surface_rgba = NULL;
+    img->w = img->h = 0;
+  }
+  if (app) {
+    if (app->renderer) SDL_DestroyRenderer(app->renderer);
+    if (app->window)   SDL_DestroyWindow(app->window);
+    app->renderer = NULL;
+    app->window = NULL;
+  }
+}
+
+void shutdown(void) {
   SDL_Log("shutdown()");
   SDL_Quit();
 }
 
-//------------------------------------------------------------------------------
-// 
-//------------------------------------------------------------------------------
-int main(int argc, char *argv[])
-{
-  (void)argc;
-  (void)argv;
-  atexit(shutdown);
+static bool img_load_rgba32(const char* path, ImageData* out) {
+  SDL_Log("Carregando: %s", path);
 
-
-
-  if (!SDL_Init(SDL_INIT_VIDEO))
-  {
-    SDL_Log("Erro ao iniciar a SDL: %s", SDL_GetError());
-    return SDL_APP_FAILURE;
+  SDL_Surface* loaded = IMG_Load(path);
+  if (!loaded) {
+    log_sdl_error("IMG_Load falhou");
+    return false;
   }
 
-  const char* WINDOW_TITLE = "Hello, SDL_Renderer";
-  enum constants
-  {
-    WINDOW_WIDTH = 640,
-    WINDOW_HEIGHT = 480,
-    WINDOW_HEIGHT_HALF = WINDOW_HEIGHT >> 1,
-    WINDOW_TITLE_MAX_LENGTH = 64,
-    LINE_OFFSET = 10,
-  };
-
-  //SDL_CreateWindowAndRederer --> cria a janela e o renderizador (algo utilizado para exibir o conteúdo na tela)
-   SDL_Window *window = NULL;
-   SDL_Renderer *renderer = NULL;
-  if (!SDL_CreateWindowAndRenderer(WINDOW_TITLE, WINDOW_WIDTH, WINDOW_HEIGHT, 0,
-    &window, &renderer))
-  {
-    SDL_Log("Erro ao criar a janela e/ou renderizador: %s", SDL_GetError());
-    return SDL_APP_FAILURE;
+  SDL_Surface* rgba = SDL_ConvertSurface(loaded, SDL_PIXELFORMAT_RGBA32);
+  SDL_DestroySurface(loaded);
+  if (!rgba) {
+    log_sdl_error("SDL_ConvertSurface para RGBA32 falhou");
+    return false;
   }
-  char windowTitle[WINDOW_TITLE_MAX_LENGTH] = { 0 };
 
-//   SDL_Window *window = SDL_CreateWindow(WINDOW_TITLE, WINDOW_WIDTH, WINDOW_HEIGHT, 0);
-//   if (!window)
-//   {
-//     SDL_Log("Erro ao criar a janela: %s", SDL_GetError());
-//     return SDL_APP_FAILURE;
-//   }
+  out->surface_rgba = rgba;
+  out->texture = NULL;
+  out->w = rgba->w;
+  out->h = rgba->h;
 
-  SDL_Event event;
-  bool isRunning = true;
-  while (isRunning)
-  {
-    while (SDL_PollEvent(&event))
-    {
-      switch (event.type)
-      {
-        case SDL_EVENT_QUIT:
-          isRunning = false;
-          break;
+  const char* fmt_name = SDL_GetPixelFormatName(rgba->format);
+  SDL_Log("Imagem OK: %dx%d | pitch=%d bytes | formato=%s",
+          rgba->w, rgba->h, rgba->pitch, fmt_name ? fmt_name : "(desconhecido)");
+  return true;
+}
 
-        case SDL_EVENT_MOUSE_MOTION:
-          snprintf(windowTitle, WINDOW_TITLE_MAX_LENGTH,
-            "%s (%.0f, %.0f)", WINDOW_TITLE, event.motion.x, event.motion.y);
-          SDL_SetWindowTitle(window, windowTitle);
-          break;
+static bool preview_open(AppContext* app, ImageData* img) {
+  app->window = SDL_CreateWindow("Pré-visualização (carregamento)", img->w, img->h, 0);
+  if (!app->window) { log_sdl_error("SDL_CreateWindow falhou"); return false; }
+
+  app->renderer = SDL_CreateRenderer(app->window, NULL);
+  if (!app->renderer) { log_sdl_error("SDL_CreateRenderer falhou"); return false; }
+
+  img->texture = SDL_CreateTextureFromSurface(app->renderer, img->surface_rgba);
+  if (!img->texture) { log_sdl_error("SDL_CreateTextureFromSurface falhou"); return false; }
+
+  return true;
+}
+
+static void preview_loop(AppContext* app, ImageData* img) {
+  bool running = true;
+  while (running) {
+    SDL_Event e;
+    while (SDL_PollEvent(&e)) {
+      if (e.type == SDL_EVENT_QUIT || e.type == SDL_EVENT_KEY_DOWN) {
+        running = false;
       }
     }
 
-    SDL_SetRenderDrawColor(renderer, 128, 128, 128, 255);
-    SDL_RenderClear(renderer);
+    SDL_SetRenderDrawColor(app->renderer, 20, 20, 20, 255);
+    SDL_RenderClear(app->renderer);
 
-    SDL_SetRenderDrawColor(renderer, 255, 0, 0, 255);
-    SDL_RenderLine(renderer,
-      LINE_OFFSET, WINDOW_HEIGHT_HALF - LINE_OFFSET,
-      WINDOW_WIDTH - LINE_OFFSET, WINDOW_HEIGHT_HALF - LINE_OFFSET);
+    SDL_FRect dst = {0, 0, (float)img->w, (float)img->h};
+    SDL_RenderTexture(app->renderer, img->texture, NULL, &dst);
+    SDL_RenderPresent(app->renderer);
 
-    SDL_SetRenderDrawColor(renderer, 0, 255, 0, 255);
-    SDL_RenderLine(renderer,
-      LINE_OFFSET, WINDOW_HEIGHT_HALF,
-      WINDOW_WIDTH - LINE_OFFSET, WINDOW_HEIGHT_HALF);
+    SDL_Delay(16);
+  }
+}
 
-    SDL_SetRenderDrawColor(renderer, 0, 0, 255, 255);
-    SDL_RenderLine(renderer,
-      LINE_OFFSET, WINDOW_HEIGHT_HALF + LINE_OFFSET,
-      WINDOW_WIDTH - LINE_OFFSET, WINDOW_HEIGHT_HALF + LINE_OFFSET);
 
-    SDL_RenderPresent(renderer);
+int main(int argc, char** argv) {
+  atexit(shutdown); 
+
+  if (argc != 2) {
+    SDL_Log("Uso: %s <caminho_imagem>\nEx.: %s images/foto.png", argv[0], argv[0]);
+    return 1;
   }
 
-  SDL_DestroyRenderer(renderer);
-  SDL_DestroyWindow(window);
-  renderer = NULL;
-  window = NULL;
+  const char* path = argv[1];
 
+  AppContext app = {0};
+  if (!sdl_bootstrap(&app)) return 1;
+
+  ImageData img = {0};
+  if (!img_load_rgba32(path, &img)) {
+    cleanup_resources(&app, &img);
+    return 1;
+  }
+
+
+  if (preview_open(&app, &img)) {
+    preview_loop(&app, &img);
+  }
+
+  cleanup_resources(&app, &img);
   return 0;
 }
