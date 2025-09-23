@@ -19,6 +19,7 @@ typedef struct {
   SDL_Surface* surface_rgba;   //surface de trabalho em RGBA32 
   SDL_Texture* texture;        //textura para renderizar 
   int w, h;
+  SDL_Surface* original_gray;
 } ImageData;
 
 typedef enum { BTN_IDLE, BTN_HOVER, BTN_ACTIVE } ButtonState;
@@ -38,6 +39,7 @@ typedef struct {
   float      mean, stddev;
   char       meanLabel[64];
   char       stdLabel[64];
+  bool is_equalized;
 } UIContext;
 
 //constantes
@@ -54,14 +56,15 @@ static bool  is_surface_grayscale_rgba32(const SDL_Surface* surf);
 static bool  convert_to_grayscale_inplace(SDL_Surface* surf);
 static void  compute_histogram_gray_rgba32(const SDL_Surface* surf, Uint32 hist[256], float* out_mean, float* out_stddev);
 static void  draw_histogram(SDL_Renderer* rr, const Uint32 hist[256], SDL_FRect area, float yzoom);
-// static void  draw_button(SDL_Renderer* rr, const UIButton* btn);
+static void  draw_button(SDL_Renderer* rr, const UIButton* btn, TTF_Font* font, bool is_equalized);
 static bool  create_main_window(UIContext* ui, int imgw, int imgh);
 static bool  create_side_window(UIContext* ui);
 static void  cleanup_all(UIContext* ui, ImageData* img);
 static void  render_main_window(UIContext* ui, ImageData* img);
 static void  render_side_window(UIContext* ui);
-static void  handle_events(UIContext* ui);
+static void  handle_events(UIContext* ui, ImageData* img);
 static void  render_loop(UIContext* ui, ImageData* img);
+static bool  equalize_histogram_inplace(SDL_Surface* surf);
 void shutdown(void);
 
 //funções
@@ -285,12 +288,39 @@ static void draw_text(SDL_Renderer* rr, TTF_Font* font,
 }
 
 
-// static void draw_button(SDL_Renderer* rr, const UIButton* btn) {
-//   SDL_SetRenderDrawColor(rr, 0,102,204,255); // azul fixo
-//   SDL_RenderFillRect(rr, &btn->rect);
-//   SDL_SetRenderDrawColor(rr, 20,20,20,255);
-//   SDL_RenderRect(rr, &btn->rect);
-// }
+static void draw_button(SDL_Renderer* rr, const UIButton* btn, TTF_Font* font, bool is_equalized) {
+  // cores por estado
+  SDL_Color fill;
+  switch (btn->state) {
+    case BTN_IDLE:   fill = (SDL_Color){  0,102,204,255}; break; // azul
+    case BTN_HOVER:  fill = (SDL_Color){ 30,144,255,255}; break; // azul claro
+    case BTN_ACTIVE: fill = (SDL_Color){  0, 70,160,255}; break; // azul escuro
+    default:         fill = (SDL_Color){  0,102,204,255}; break;
+  }
+  SDL_SetRenderDrawColor(rr, fill.r, fill.g, fill.b, fill.a);
+  SDL_RenderFillRect(rr, &btn->rect);
+
+  // borda
+  SDL_SetRenderDrawColor(rr, 20,20,20,255);
+  SDL_RenderRect(rr, &btn->rect);
+
+  // rótulo
+  const char* label = is_equalized ? "Original" : "Equalizar";
+  SDL_Surface* s = TTF_RenderText_Blended(font, label, 0, (SDL_Color){240,240,240,255});
+  if (!s) return;
+  SDL_Texture* t = SDL_CreateTextureFromSurface(rr, s);
+  if (!t) { SDL_DestroySurface(s); return; }
+
+  SDL_FRect dst = {
+    btn->rect.x + (btn->rect.w - s->w) * 0.5f,
+    btn->rect.y + (btn->rect.h - s->h) * 0.5f,
+    (float)s->w, (float)s->h
+  };
+  SDL_RenderTexture(rr, t, NULL, &dst);
+  SDL_DestroyTexture(t);
+  SDL_DestroySurface(s);
+}
+
 
 
 
@@ -327,7 +357,7 @@ static bool create_side_window(UIContext* ui) {
   ui->eqButton.rect.x = SIDE_MARGIN;
   ui->eqButton.rect.w = BUTTON_W;
   ui->eqButton.rect.h = BUTTON_H;
-  ui->eqButton.rect.y = SIDE_H - SIDE_MARGIN - ui->eqButton.rect.h;
+  ui->eqButton.rect.y = 0;
   ui->eqButton.state  = BTN_IDLE;
   return true;
 }
@@ -341,6 +371,7 @@ static void cleanup_all(UIContext* ui, ImageData* img) {
   if (img) {
     if (img->texture)      SDL_DestroyTexture(img->texture);
     if (img->surface_rgba) SDL_DestroySurface(img->surface_rgba);
+    if (img->original_gray) SDL_DestroySurface(img->original_gray);
   }
   if (ui) {
     if (ui->mainApp.renderer) SDL_DestroyRenderer(ui->mainApp.renderer);
@@ -350,69 +381,192 @@ static void cleanup_all(UIContext* ui, ImageData* img) {
   }
 }
 
+static bool point_in_rect(float x, float y, SDL_FRect r) {
+  return (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h);
+}
 
+static void rebuild_texture(ImageData* img, SDL_Renderer* rr) {
+  if (img->texture) { SDL_DestroyTexture(img->texture); img->texture = NULL; }
+  img->texture = SDL_CreateTextureFromSurface(rr, img->surface_rgba);
+  if (!img->texture) SDL_Log("*** CreateTextureFromSurface falhou: %s", SDL_GetError());
+}
+
+static void recompute_stats(UIContext* ui, ImageData* img) {
+  compute_histogram_gray_rgba32(img->surface_rgba, ui->hist, &ui->mean, &ui->stddev);
+  snprintf(ui->meanLabel, sizeof(ui->meanLabel),
+           "Média de intensidade: %.1f (%s)", ui->mean, classify_mean(ui->mean));
+  snprintf(ui->stdLabel, sizeof(ui->stdLabel),
+           "Desvio padrão: %.1f (contraste %s)", ui->stddev, classify_stddev(ui->stddev));
+}
 
 static void render_side_window(UIContext* ui) {
   SDL_SetRenderDrawColor(ui->sideApp.renderer, 15,15,15,255);
   SDL_RenderClear(ui->sideApp.renderer);
 
-  // área do histograma
-  SDL_FRect histArea = { SIDE_MARGIN, SIDE_MARGIN,
-                         SIDE_W - SIDE_MARGIN*2,
-                         SIDE_H - SIDE_MARGIN*3 - BUTTON_H };
+  // medidas de texto
+  int line_h = TTF_GetFontLineSkip(ui->font);
+  if (line_h <= 0) line_h = 18; // fallback
+  const float gap = 6.0f;
+  const float labels_h = (float)(line_h * 2) + gap; // duas linhas + respiro
+
+  // área do histograma agora reserva espaço p/ textos E botão
+  SDL_FRect histArea = {
+    SIDE_MARGIN,
+    SIDE_MARGIN,
+    SIDE_W - SIDE_MARGIN * 2.0f,
+    SIDE_H - SIDE_MARGIN * 3.0f - BUTTON_H - labels_h
+  };
+  if (histArea.h < 80.0f) histArea.h = 80.0f; // evita ficar negativo/pequeno demais
+
+  // histograma
   draw_histogram(ui->sideApp.renderer, ui->hist, histArea, ui->yzoom);
 
+  // textos logo abaixo do histograma
   int textX = (int)histArea.x + 6;
-  int textY = (int)(histArea.y + histArea.h) + 6; // logo abaixo do histograma
+  int textY = (int)(histArea.y + histArea.h) + (int)gap;
   draw_text(ui->sideApp.renderer, ui->font, ui->meanLabel, textX, textY);
-  textY += 22;  // espaçamento entre linhas
+  textY += line_h; // próxima linha
   draw_text(ui->sideApp.renderer, ui->font, ui->stdLabel,  textX, textY);
 
-  // botão
-  // draw_button(ui->sideApp.renderer, &ui->eqButton);
+  // botão abaixo dos textos
+  ui->eqButton.rect.y = (float)( (int)(histArea.y + histArea.h) + (int)labels_h );
+  draw_button(ui->sideApp.renderer, &ui->eqButton, ui->font, ui->is_equalized);
 
   SDL_RenderPresent(ui->sideApp.renderer);
 }
 
 
-static void handle_events(UIContext* ui) {
+static void handle_events(UIContext* ui, ImageData* img) {
   SDL_Event e;
   while (SDL_PollEvent(&e)) {
     if (e.type == SDL_EVENT_QUIT) exit(0);
+
     if (e.type == SDL_EVENT_WINDOW_RESIZED || e.type == SDL_EVENT_WINDOW_MOVED) {
       int x,y,w,h;
       SDL_GetWindowPosition(ui->mainApp.window, &x,&y);
       SDL_GetWindowSize(ui->mainApp.window, &w,&h);
       SDL_SetWindowPosition(ui->sideApp.window, x + w + SIDE_MARGIN, y);
     }
+
     if (e.type == SDL_EVENT_KEY_DOWN) {
       if (e.key.key == SDLK_ESCAPE) exit(0);
-      if (e.key.key == SDLK_EQUALS || e.key.key == SDLK_PLUS) { //aumenta zoom
+      if (e.key.key == SDLK_EQUALS || e.key.key == SDLK_PLUS)
         ui->yzoom = ui->yzoom < 4.0f ? ui->yzoom + 0.25f : 4.0f;
-      }
-      if (e.key.key == SDLK_MINUS) { //diminui zoom
+      if (e.key.key == SDLK_MINUS)
         ui->yzoom = ui->yzoom > 0.25f ? ui->yzoom - 0.25f : 0.25f;
+    }
+
+    // eventos do botão (apenas quando mouse está na janela secundária)
+    if (e.type == SDL_EVENT_MOUSE_MOTION || e.type == SDL_EVENT_MOUSE_BUTTON_DOWN || e.type == SDL_EVENT_MOUSE_BUTTON_UP) {
+      SDL_Window* focus = SDL_GetMouseFocus();
+      if (focus == ui->sideApp.window) {
+        float mx = (float)e.motion.x;
+        float my = (float)e.motion.y;
+        bool inside = point_in_rect(mx, my, ui->eqButton.rect);
+
+        if (e.type == SDL_EVENT_MOUSE_MOTION) {
+          ui->eqButton.state = inside ? BTN_HOVER : BTN_IDLE;
+        }
+
+        if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && inside && e.button.button == SDL_BUTTON_LEFT) {
+          ui->eqButton.state = BTN_ACTIVE;
+        }
+
+        if (e.type == SDL_EVENT_MOUSE_BUTTON_UP && e.button.button == SDL_BUTTON_LEFT) {
+          if (inside && ui->eqButton.state == BTN_ACTIVE) {
+            // equalização
+            ui->is_equalized = !ui->is_equalized;
+
+            if (ui->is_equalized) {
+              // aplica equalização na imagem atual (que está em cinza)
+              if (!equalize_histogram_inplace(img->surface_rgba)) {
+                SDL_Log("*** equalize_histogram_inplace falhou");
+                ui->is_equalized = false;
+              }
+            } else {
+              // reverte a partir do backup
+              if (!SDL_LockSurface(img->surface_rgba) || !SDL_LockSurface(img->original_gray)) {
+                SDL_Log("*** Lock para reverter falhou: %s", SDL_GetError());
+                if (SDL_MUSTLOCK(img->original_gray)) SDL_UnlockSurface(img->original_gray);
+                if (SDL_MUSTLOCK(img->surface_rgba))  SDL_UnlockSurface(img->surface_rgba);
+              } else {
+                memcpy(img->surface_rgba->pixels, img->original_gray->pixels, (size_t)img->h * img->original_gray->pitch);
+                SDL_UnlockSurface(img->original_gray);
+                SDL_UnlockSurface(img->surface_rgba);
+              }
+            }
+
+            // atualizar textura e estatísticas
+            rebuild_texture(img, ui->mainApp.renderer);
+            recompute_stats(ui, img);
+          }
+          // estado visual pós-click
+          ui->eqButton.state = inside ? BTN_HOVER : BTN_IDLE;
+        }
       }
     }
   }
 }
-static void render_loop(UIContext* ui, ImageData* img) {
-  compute_histogram_gray_rgba32(img->surface_rgba, ui->hist, &ui->mean, &ui->stddev);
-  snprintf(ui->meanLabel, sizeof(ui->meanLabel),
-          "Média de intensidade: %.1f (%s)",
-          ui->mean, classify_mean(ui->mean));
 
-  snprintf(ui->stdLabel, sizeof(ui->stdLabel),
-          "Desvio padrão: %.1f (contraste %s)",
-          ui->stddev, classify_stddev(ui->stddev));
+static void render_loop(UIContext* ui, ImageData* img) {
+  recompute_stats(ui, img);
 
   for (;;) {
-    handle_events(ui);
+    handle_events(ui, img);
     render_main_window(ui, img);
     render_side_window(ui);
     SDL_Delay(16);
   }
 }
+
+
+// equaliza in-place assumindo imagem em GRAYSCALE já (R==G==B) em RGBA32
+static bool equalize_histogram_inplace(SDL_Surface* surf) {
+  if (!surf) return false;
+  if (!SDL_LockSurface(surf)) return false;
+
+  const SDL_PixelFormatDetails* fmt = SDL_GetPixelFormatDetails(surf->format);
+  const SDL_Palette* pal = SDL_GetSurfacePalette(surf);
+  Uint32* px = (Uint32*)surf->pixels;
+  const int n = surf->w * surf->h;
+
+  // 1) histograma
+  Uint32 hist[256] = {0};
+  for (int i = 0; i < n; i++) {
+    Uint8 r,g,b,a; SDL_GetRGBA(px[i], fmt, pal, &r,&g,&b,&a);
+    hist[r]++; // r==g==b
+  }
+
+  // 2) CDF normalizada
+  Uint32 cum = 0; double cdf[256];
+  // Uint32 min_nonzero = 0;
+  // bool found = false;
+  for (int i = 0; i < 256; i++) {
+    // if (!found && hist[i] != 0) { min_nonzero = hist[i]; found = true; }
+    cum += hist[i];
+    cdf[i] = (double)cum / (double)n;   // [0..1]
+  }
+
+  // 3) mapeia intensidade antiga -> nova (0..255)
+  Uint8 lut[256];
+  for (int i = 0; i < 256; i++) {
+    int v = (int)round(cdf[i] * 255.0);
+    if (v < 0) v = 0;
+    if (v > 255) v = 255;
+    lut[i] = (Uint8)v;
+  }
+
+  // 4) aplica
+  for (int i = 0; i < n; i++) {
+    Uint8 r,g,b,a; SDL_GetRGBA(px[i], fmt, pal, &r,&g,&b,&a);
+    Uint8 y = lut[r];
+    px[i] = SDL_MapRGBA(fmt, pal, y, y, y, a);
+  }
+
+  SDL_UnlockSurface(surf);
+  return true;
+}
+
 
 int main(int argc, char** argv) {
   atexit(shutdown);
@@ -442,7 +596,27 @@ int main(int argc, char** argv) {
     }
   }
 
+
+  // cria backup da imagem em cinza para poder reverter
+  img.original_gray = SDL_CreateSurface(img.w, img.h, SDL_PIXELFORMAT_RGBA32);
+  if (!img.original_gray) {
+    SDL_Log("*** Falha ao criar surface original_gray: %s", SDL_GetError());
+    cleanup_all(NULL, &img); return 1;
+  }
+  if (!SDL_LockSurface(img.surface_rgba) || !SDL_LockSurface(img.original_gray)) {
+    SDL_Log("*** Falha ao lockar para copiar original_gray: %s", SDL_GetError());
+    if (SDL_MUSTLOCK(img.original_gray)) SDL_UnlockSurface(img.original_gray);
+    if (SDL_MUSTLOCK(img.surface_rgba))  SDL_UnlockSurface(img.surface_rgba);
+    cleanup_all(NULL, &img); return 1;
+  }
+  memcpy(img.original_gray->pixels, img.surface_rgba->pixels,
+        (size_t)img.h * img.surface_rgba->pitch);
+  SDL_UnlockSurface(img.original_gray);
+  SDL_UnlockSurface(img.surface_rgba);
+
+
   UIContext ui = {0};
+  ui.is_equalized = false;
   ui.yzoom = 1.5f;
   if (!create_main_window(&ui, img.w, img.h)) { cleanup_all(&ui, &img); return 1; }
   if (!create_side_window(&ui))               { cleanup_all(&ui, &img); return 1; }
