@@ -4,8 +4,10 @@
 #include <stdlib.h>
 #include <SDL3/SDL.h>
 #include <SDL3_image/SDL_image.h>
+#include <SDL3_ttf/SDL_ttf.h>
 #include <string.h>   
 #include <math.h> 
+#define FONT_PATH "Roboto-Regular.ttf"
 
 //variáveis e structs
 typedef struct {
@@ -31,11 +33,16 @@ typedef struct {
   AppContext sideApp;
   UIButton   eqButton;
   Uint32     hist[256];
+  TTF_Font*  font;
+  float      yzoom; 
+  float      mean, stddev;
+  char       meanLabel[64];
+  char       stdLabel[64];
 } UIContext;
 
 //constantes
-#define SIDE_W  420
-#define SIDE_H  340
+#define SIDE_W  320
+#define SIDE_H  440
 #define SIDE_MARGIN 16
 #define BUTTON_H 36
 #define BUTTON_W 160
@@ -46,8 +53,8 @@ static bool  img_load_rgba32(const char* path, ImageData* out);
 static bool  is_surface_grayscale_rgba32(const SDL_Surface* surf);
 static bool  convert_to_grayscale_inplace(SDL_Surface* surf);
 static void  compute_histogram_gray_rgba32(const SDL_Surface* surf, Uint32 hist[256], float* out_mean, float* out_stddev);
-static void  draw_histogram(SDL_Renderer* rr, const Uint32 hist[256], SDL_FRect area);
-static void  draw_button(SDL_Renderer* rr, const UIButton* btn);
+static void  draw_histogram(SDL_Renderer* rr, const Uint32 hist[256], SDL_FRect area, float yzoom);
+// static void  draw_button(SDL_Renderer* rr, const UIButton* btn);
 static bool  create_main_window(UIContext* ui, int imgw, int imgh);
 static bool  create_side_window(UIContext* ui);
 static void  cleanup_all(UIContext* ui, ImageData* img);
@@ -64,6 +71,7 @@ static void log_sdl_error(const char* msg) {
 
 void shutdown(void) {
   SDL_Log("shutdown()");
+  TTF_Quit();
   SDL_Quit();
 }
 
@@ -94,6 +102,20 @@ static bool img_load_rgba32(const char* path, ImageData* out) {
           rgba->w, rgba->h, rgba->pitch, fmt_name ? fmt_name : "(desconhecido)");
   return true;
 }
+
+
+static const char* classify_mean(float mean) {
+  if (mean < 85.f)   return "escura";
+  if (mean < 170.f)  return "média";
+  return "clara";
+}
+
+static const char* classify_stddev(float sd) {
+  if (sd < 30.f)     return "baixo";
+  if (sd < 60.f)     return "médio";
+  return "alto";
+}
+
 
 static void render_main_window(UIContext* ui, ImageData* img) {
   SDL_SetRenderDrawColor(ui->mainApp.renderer, 20,20,20,255);
@@ -127,11 +149,12 @@ static bool is_surface_grayscale_rgba32(const SDL_Surface* surf) {
   const int w = surf->w, h = surf->h;
   const int count = w * h;
   const SDL_PixelFormatDetails* fmt = SDL_GetPixelFormatDetails(surf->format);
+  const SDL_Palette* pal = SDL_GetSurfacePalette((SDL_Surface*)surf);
 
   bool is_gray = true;
   for (int i = 0; i < count; i++) {
     Uint8 r, g, b, a;
-    SDL_GetRGBA(pixels[i], fmt, NULL, &r, &g, &b, &a);
+    SDL_GetRGBA(pixels[i], fmt, pal, &r, &g, &b, &a);
     if (!(r == g && g == b)) { is_gray = false; break; }
   }
 
@@ -149,16 +172,16 @@ static bool convert_to_grayscale_inplace(SDL_Surface* surf) {
   Uint32* pixels = (Uint32*)surf->pixels;
   const int count = surf->w * surf->h;
   const SDL_PixelFormatDetails* fmt = SDL_GetPixelFormatDetails(surf->format);
-
+   const SDL_Palette* pal = SDL_GetSurfacePalette(surf);
   for (int i = 0; i < count; i++) {
     Uint8 r, g, b, a;
-    SDL_GetRGBA(pixels[i], fmt, NULL, &r, &g, &b, &a);
+    SDL_GetRGBA(pixels[i], fmt, pal, &r, &g, &b, &a);
 
     // Y = 0.2125R + 0.7154G + 0.0721B 
     float Yf = 0.2125f * (float)r + 0.7154f * (float)g + 0.0721f * (float)b;
     Uint8 Y = (Uint8)(Yf + 0.5f);
 
-    pixels[i] = SDL_MapRGBA(fmt, NULL, Y, Y, Y, a);
+    pixels[i] = SDL_MapRGBA(fmt, pal, Y, Y, Y, a);
   }
 
   SDL_UnlockSurface(surf);
@@ -177,11 +200,12 @@ static void compute_histogram_gray_rgba32(const SDL_Surface* surf, Uint32 hist[2
   }
   const Uint32* p = (const Uint32*)surf->pixels;
   const SDL_PixelFormatDetails* fmt = SDL_GetPixelFormatDetails(surf->format);
+  const SDL_Palette* pal = SDL_GetSurfacePalette((SDL_Surface*)surf);
 
   double sum = 0.0, sum2 = 0.0;
   for (int i = 0; i < count; i++) {
     Uint8 r,g,b,a;
-    SDL_GetRGBA(p[i], fmt, NULL, &r,&g,&b,&a);
+    SDL_GetRGBA(p[i], fmt, pal, &r,&g,&b,&a);
     // imagem está em cinza -> r==g==b (r como intensidade)
     Uint8 Y = r;
     hist[Y]++;
@@ -199,36 +223,74 @@ static void compute_histogram_gray_rgba32(const SDL_Surface* surf, Uint32 hist[2
 }
 
 static void draw_histogram(SDL_Renderer* rr, const Uint32 hist[256],
-                           SDL_FRect area) {
-  //fundo
+                           SDL_FRect area, float yzoom)
+{
+  // fundo
   SDL_SetRenderDrawColor(rr, 30,30,30,255);
-  SDL_FRect bg = area;
-  SDL_RenderFillRect(rr, &bg);
+  SDL_RenderFillRect(rr, &area);
+  SDL_SetRenderDrawColor(rr, 60,60,60,255);
+  for (int i = 1; i <= 4; i++) {
+    float y = area.y + (area.h * i) / 5.0f;
+    SDL_RenderLine(rr, area.x, y, area.x + area.w, y);
+  }
 
-  //encontra max
+  // max
   Uint32 maxv = 1;
   for (int i = 0; i < 256; i++) if (hist[i] > maxv) maxv = hist[i];
 
-  //barras
+  // barras
   float barw = area.w / 256.0f;
+  if (barw < 2.0f) barw = 2.0f; // deixa as barras mais grossas
+  SDL_SetRenderDrawColor(rr, 220,220,220,255);
+
+  float usableH = area.h - 2.0f;
   for (int i = 0; i < 256; i++) {
-    float h = (hist[i] / (float)maxv) * (area.h - 2.0f);
-    SDL_FRect bar = { area.x + i * barw, area.y + (area.h - h), barw, h };
-    SDL_SetRenderDrawColor(rr, 200,200,200,255);
+    float h = ((float)hist[i] / (float)maxv) * usableH * yzoom;
+    if (h > usableH) h = usableH; // clampa
+    SDL_FRect bar = { area.x + i * (area.w/256.0f), area.y + (area.h - h), barw, h };
     SDL_RenderFillRect(rr, &bar);
   }
 
-  //moldura
-  SDL_SetRenderDrawColor(rr, 80,80,80,255);
+  // moldura
+  SDL_SetRenderDrawColor(rr, 100,100,100,255);
   SDL_RenderRect(rr, &area);
 }
 
-static void draw_button(SDL_Renderer* rr, const UIButton* btn) {
-  SDL_SetRenderDrawColor(rr, 0,102,204,255); // azul fixo
-  SDL_RenderFillRect(rr, &btn->rect);
-  SDL_SetRenderDrawColor(rr, 20,20,20,255);
-  SDL_RenderRect(rr, &btn->rect);
+static void draw_text(SDL_Renderer* rr, TTF_Font* font,
+                      const char* msg, int x, int y)
+{
+  if (!font || !msg || !*msg) return;
+
+  SDL_Color white = (SDL_Color){ 230, 230, 230, 255 };
+
+  // length = 0  => string null-terminated (UTF-8)
+  SDL_Surface* surf = TTF_RenderText_Blended(font, msg, 0, white);
+  if (!surf) {
+    SDL_Log("TTF_RenderText_Blended falhou: %s", SDL_GetError());
+    return;
+  }
+
+  SDL_Texture* tex = SDL_CreateTextureFromSurface(rr, surf);
+  if (!tex) {
+    SDL_Log("CreateTextureFromSurface (texto) falhou: %s", SDL_GetError());
+    SDL_DestroySurface(surf);
+    return;
+  }
+
+  SDL_FRect dst = { (float)x, (float)y, (float)surf->w, (float)surf->h };
+  SDL_RenderTexture(rr, tex, NULL, &dst);
+
+  SDL_DestroyTexture(tex);
+  SDL_DestroySurface(surf);
 }
+
+
+// static void draw_button(SDL_Renderer* rr, const UIButton* btn) {
+//   SDL_SetRenderDrawColor(rr, 0,102,204,255); // azul fixo
+//   SDL_RenderFillRect(rr, &btn->rect);
+//   SDL_SetRenderDrawColor(rr, 20,20,20,255);
+//   SDL_RenderRect(rr, &btn->rect);
+// }
 
 
 
@@ -273,6 +335,9 @@ static bool create_side_window(UIContext* ui) {
 
 
 static void cleanup_all(UIContext* ui, ImageData* img) {
+  if (ui) {
+    if (ui->font) { TTF_CloseFont(ui->font); ui->font = NULL; }
+  }
   if (img) {
     if (img->texture)      SDL_DestroyTexture(img->texture);
     if (img->surface_rgba) SDL_DestroySurface(img->surface_rgba);
@@ -292,11 +357,19 @@ static void render_side_window(UIContext* ui) {
   SDL_RenderClear(ui->sideApp.renderer);
 
   // área do histograma
-  SDL_FRect histArea = { SIDE_MARGIN, SIDE_MARGIN, SIDE_W - SIDE_MARGIN*2, SIDE_H - SIDE_MARGIN*3 - BUTTON_H };
-  draw_histogram(ui->sideApp.renderer, ui->hist, histArea);
+  SDL_FRect histArea = { SIDE_MARGIN, SIDE_MARGIN,
+                         SIDE_W - SIDE_MARGIN*2,
+                         SIDE_H - SIDE_MARGIN*3 - BUTTON_H };
+  draw_histogram(ui->sideApp.renderer, ui->hist, histArea, ui->yzoom);
+
+  int textX = (int)histArea.x + 6;
+  int textY = (int)(histArea.y + histArea.h) + 6; // logo abaixo do histograma
+  draw_text(ui->sideApp.renderer, ui->font, ui->meanLabel, textX, textY);
+  textY += 22;  // espaçamento entre linhas
+  draw_text(ui->sideApp.renderer, ui->font, ui->stdLabel,  textX, textY);
 
   // botão
-  draw_button(ui->sideApp.renderer, &ui->eqButton);
+  // draw_button(ui->sideApp.renderer, &ui->eqButton);
 
   SDL_RenderPresent(ui->sideApp.renderer);
 }
@@ -305,30 +378,41 @@ static void render_side_window(UIContext* ui) {
 static void handle_events(UIContext* ui) {
   SDL_Event e;
   while (SDL_PollEvent(&e)) {
-    if (e.type == SDL_EVENT_QUIT) {
-      exit(0);
-    }
+    if (e.type == SDL_EVENT_QUIT) exit(0);
     if (e.type == SDL_EVENT_WINDOW_RESIZED || e.type == SDL_EVENT_WINDOW_MOVED) {
       int x,y,w,h;
       SDL_GetWindowPosition(ui->mainApp.window, &x,&y);
       SDL_GetWindowSize(ui->mainApp.window, &w,&h);
       SDL_SetWindowPosition(ui->sideApp.window, x + w + SIDE_MARGIN, y);
     }
-    if (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_ESCAPE) {
-      exit(0);
+    if (e.type == SDL_EVENT_KEY_DOWN) {
+      if (e.key.key == SDLK_ESCAPE) exit(0);
+      if (e.key.key == SDLK_EQUALS || e.key.key == SDLK_PLUS) { //aumenta zoom
+        ui->yzoom = ui->yzoom < 4.0f ? ui->yzoom + 0.25f : 4.0f;
+      }
+      if (e.key.key == SDLK_MINUS) { //diminui zoom
+        ui->yzoom = ui->yzoom > 0.25f ? ui->yzoom - 0.25f : 0.25f;
+      }
     }
   }
-
 }
-  static void render_loop(UIContext* ui, ImageData* img) {
-    compute_histogram_gray_rgba32(img->surface_rgba, ui->hist, NULL, NULL);
-    for (;;) {
-      handle_events(ui);
-      render_main_window(ui, img);
-      render_side_window(ui);
-      SDL_Delay(16);
-    }
+static void render_loop(UIContext* ui, ImageData* img) {
+  compute_histogram_gray_rgba32(img->surface_rgba, ui->hist, &ui->mean, &ui->stddev);
+  snprintf(ui->meanLabel, sizeof(ui->meanLabel),
+          "Média de intensidade: %.1f (%s)",
+          ui->mean, classify_mean(ui->mean));
+
+  snprintf(ui->stdLabel, sizeof(ui->stdLabel),
+          "Desvio padrão: %.1f (contraste %s)",
+          ui->stddev, classify_stddev(ui->stddev));
+
+  for (;;) {
+    handle_events(ui);
+    render_main_window(ui, img);
+    render_side_window(ui);
+    SDL_Delay(16);
   }
+}
 
 int main(int argc, char** argv) {
   atexit(shutdown);
@@ -339,7 +423,12 @@ int main(int argc, char** argv) {
   }
 
   if (!SDL_Init(SDL_INIT_VIDEO)) {
-    log_sdl_error("SDL_Init"); return 1;
+    log_sdl_error("SDL_Init: Erro ao inicializar"); return 1;
+  }
+  if (!TTF_Init()) {
+    SDL_Log("*** TTF_Init falhou: %s", SDL_GetError());
+    return 1;
+
   }
 
   ImageData img = {0};
@@ -354,8 +443,16 @@ int main(int argc, char** argv) {
   }
 
   UIContext ui = {0};
+  ui.yzoom = 1.5f;
   if (!create_main_window(&ui, img.w, img.h)) { cleanup_all(&ui, &img); return 1; }
   if (!create_side_window(&ui))               { cleanup_all(&ui, &img); return 1; }
+
+  ui.font = TTF_OpenFont(FONT_PATH, 16);  // tamanho 16 px
+  if (!ui.font) {
+    SDL_Log("*** Falha ao abrir fonte '%s': %s", FONT_PATH, SDL_GetError());
+    cleanup_all(&ui, &img);
+    return 1;
+  }
 
   img.texture = SDL_CreateTextureFromSurface(ui.mainApp.renderer, img.surface_rgba);
   if (!img.texture) { log_sdl_error("CreateTextureFromSurface"); cleanup_all(&ui, &img); return 1; }

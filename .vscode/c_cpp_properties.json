@@ -5,6 +5,7 @@
             "includePath": [
                 "${workspaceFolder}/**",
                 "F:/Users/Arthur/dev/libs/SDL3/include"
+                // "F:/Users/Arthur/dev/libs/SDL3/include"
             ],
             "defines": [
                 "_DEBUG",

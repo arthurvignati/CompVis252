@@ -8,7 +8,7 @@
       "options": {
         "cwd": "${workspaceFolder}",
         "env": {
-          "PATH": "C:/msys64/ucrt64/bin;C:/msys64/usr/bin"
+          "PATH": "C:/msys64/ucrt64/bin;C:/msys64/usr/bin;${env:PATH}"
         }
       },
       "args": [
@@ -19,10 +19,24 @@
         "-IC:/msys64/ucrt64/include",
         "-LC:/msys64/ucrt64/lib",
         "-lSDL3_image",
+        "-lSDL3_ttf",
         "-lSDL3"
       ],
       "group": { "kind": "build", "isDefault": true },
-      "problemMatcher": ["$gcc"]
+      "problemMatcher": ["$gcc"],
+      "detail": "Build com SDL3 + SDL3_image + SDL3_ttf (UCRT64)"
+    },
+    {
+      "label": "Run main.exe",
+      "type": "shell",
+      "command": "./main.exe",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "PATH": "C:/msys64/ucrt64/bin;C:/msys64/usr/bin;${env:PATH}"
+        }
+      },
+      "problemMatcher": []
     }
   ]
 }
