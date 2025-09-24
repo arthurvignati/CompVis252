@@ -69,7 +69,7 @@ void shutdown(void);
 
 //funções
 static void log_sdl_error(const char* msg) {
-  SDL_Log("*** %s: %s", msg, SDL_GetError());
+  SDL_Log("%s: %s", msg, SDL_GetError());
 }
 
 void shutdown(void) {
@@ -144,7 +144,7 @@ static bool is_surface_grayscale_rgba32(const SDL_Surface* surf) {
   if (!surf) return false;
 
   if (!SDL_LockSurface((SDL_Surface*)surf)) { 
-    SDL_Log("*** Falha ao SDL_LockSurface (is_surface_grayscale): %s", SDL_GetError());
+    SDL_Log("Falha ao SDL_LockSurface (is_surface_grayscale): %s", SDL_GetError());
     return false;
   }
 
@@ -168,7 +168,7 @@ static bool is_surface_grayscale_rgba32(const SDL_Surface* surf) {
 static bool convert_to_grayscale_inplace(SDL_Surface* surf) {
   if (!surf) return false;
   if (!SDL_LockSurface(surf)) {
-    SDL_Log("*** Falha ao SDL_LockSurface (convert_to_grayscale): %s", SDL_GetError());
+    SDL_Log("Falha ao SDL_LockSurface (convert_to_grayscale): %s", SDL_GetError());
     return false;
   }
 
@@ -198,7 +198,7 @@ static void compute_histogram_gray_rgba32(const SDL_Surface* surf, Uint32 hist[2
   const int count = surf->w * surf->h;
 
   if (!SDL_LockSurface((SDL_Surface*)surf)) {
-    SDL_Log("*** Lock falhou (hist): %s", SDL_GetError());
+    SDL_Log("Lock falhou (hist): %s", SDL_GetError());
     return;
   }
   const Uint32* p = (const Uint32*)surf->pixels;
@@ -388,7 +388,7 @@ static bool point_in_rect(float x, float y, SDL_FRect r) {
 static void rebuild_texture(ImageData* img, SDL_Renderer* rr) {
   if (img->texture) { SDL_DestroyTexture(img->texture); img->texture = NULL; }
   img->texture = SDL_CreateTextureFromSurface(rr, img->surface_rgba);
-  if (!img->texture) SDL_Log("*** CreateTextureFromSurface falhou: %s", SDL_GetError());
+  if (!img->texture) SDL_Log("CreateTextureFromSurface falhou: %s", SDL_GetError());
 }
 
 static void recompute_stats(UIContext* ui, ImageData* img) {
@@ -454,6 +454,14 @@ static void handle_events(UIContext* ui, ImageData* img) {
         ui->yzoom = ui->yzoom < 4.0f ? ui->yzoom + 0.25f : 4.0f;
       if (e.key.key == SDLK_MINUS)
         ui->yzoom = ui->yzoom > 0.25f ? ui->yzoom - 0.25f : 0.25f;
+      if (e.key.scancode == SDL_SCANCODE_S) {
+        SDL_ClearError();
+        if (IMG_SavePNG(img->surface_rgba, "output_image.png") != true) {
+          SDL_Log("Erro em salvar: %s", SDL_GetError());
+        } else {
+          SDL_Log("Imagem salva");
+        }
+      }
     }
 
     // eventos do botão (apenas quando mouse está na janela secundária)
@@ -480,13 +488,13 @@ static void handle_events(UIContext* ui, ImageData* img) {
             if (ui->is_equalized) {
               // aplica equalização na imagem atual (que está em cinza)
               if (!equalize_histogram_inplace(img->surface_rgba)) {
-                SDL_Log("*** equalize_histogram_inplace falhou");
+                SDL_Log("equalize_histogram_inplace falhou");
                 ui->is_equalized = false;
               }
             } else {
               // reverte a partir do backup
               if (!SDL_LockSurface(img->surface_rgba) || !SDL_LockSurface(img->original_gray)) {
-                SDL_Log("*** Lock para reverter falhou: %s", SDL_GetError());
+                SDL_Log("Lock para reverter falhou: %s", SDL_GetError());
                 if (SDL_MUSTLOCK(img->original_gray)) SDL_UnlockSurface(img->original_gray);
                 if (SDL_MUSTLOCK(img->surface_rgba))  SDL_UnlockSurface(img->surface_rgba);
               } else {
@@ -539,12 +547,9 @@ static bool equalize_histogram_inplace(SDL_Surface* surf) {
 
   // 2) CDF normalizada
   Uint32 cum = 0; double cdf[256];
-  // Uint32 min_nonzero = 0;
-  // bool found = false;
-  for (int i = 0; i < 256; i++) {
-    // if (!found && hist[i] != 0) { min_nonzero = hist[i]; found = true; }
+  for (int i = 0; i < 256; i++) {    
     cum += hist[i];
-    cdf[i] = (double)cum / (double)n;   // [0..1]
+    cdf[i] = (double)cum / (double)n;
   }
 
   // 3) mapeia intensidade antiga -> nova (0..255)
@@ -567,7 +572,6 @@ static bool equalize_histogram_inplace(SDL_Surface* surf) {
   return true;
 }
 
-
 int main(int argc, char** argv) {
   atexit(shutdown);
 
@@ -580,10 +584,10 @@ int main(int argc, char** argv) {
     log_sdl_error("SDL_Init: Erro ao inicializar"); return 1;
   }
   if (!TTF_Init()) {
-    SDL_Log("*** TTF_Init falhou: %s", SDL_GetError());
+    SDL_Log("TTF_Init falhou: %s", SDL_GetError());
     return 1;
-
   }
+
 
   ImageData img = {0};
   if (!img_load_rgba32(argv[1], &img)) {
@@ -600,11 +604,11 @@ int main(int argc, char** argv) {
   // cria backup da imagem em cinza para poder reverter
   img.original_gray = SDL_CreateSurface(img.w, img.h, SDL_PIXELFORMAT_RGBA32);
   if (!img.original_gray) {
-    SDL_Log("*** Falha ao criar surface original_gray: %s", SDL_GetError());
+    SDL_Log("Falha ao criar surface original_gray: %s", SDL_GetError());
     cleanup_all(NULL, &img); return 1;
   }
   if (!SDL_LockSurface(img.surface_rgba) || !SDL_LockSurface(img.original_gray)) {
-    SDL_Log("*** Falha ao lockar para copiar original_gray: %s", SDL_GetError());
+    SDL_Log("Falha ao lockar para copiar original_gray: %s", SDL_GetError());
     if (SDL_MUSTLOCK(img.original_gray)) SDL_UnlockSurface(img.original_gray);
     if (SDL_MUSTLOCK(img.surface_rgba))  SDL_UnlockSurface(img.surface_rgba);
     cleanup_all(NULL, &img); return 1;
@@ -623,7 +627,7 @@ int main(int argc, char** argv) {
 
   ui.font = TTF_OpenFont(FONT_PATH, 16);  // tamanho 16 px
   if (!ui.font) {
-    SDL_Log("*** Falha ao abrir fonte '%s': %s", FONT_PATH, SDL_GetError());
+    SDL_Log("Falha ao abrir fonte '%s': %s", FONT_PATH, SDL_GetError());
     cleanup_all(&ui, &img);
     return 1;
   }
