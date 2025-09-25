@@ -1,6 +1,10 @@
 # Projeto 1: Processamento de Imagens - Computação Visual
 
+[![Linguagem](https://img.shields.io/badge/Linguagem-C-blue.svg)](https://en.wikipedia.org/wiki/C_(programming_language))
+[![Biblioteca](https://img.shields.io/badge/Biblioteca-SDL3-brightgreen.svg)](https://www.libsdl.org/)
+[![Mackenzie](https://img.shields.io/badge/Universidade-Mackenzie-red.svg)](https://www.mackenzie.br/)
 ---
+
 
 ## Sumário
 
